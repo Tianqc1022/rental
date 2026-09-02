@@ -6,7 +6,7 @@
   var BIN_ID = cfg.BIN_ID || '';
 
   var STATUS_CN = { rented: '已出租', vacant: '空置' };
-  var STATUS_EN = { '已出租': 'rented', '空置': 'vacant', '出租中': 'rented' };
+  var STATUS_EN = { '已出租': 'rented', '空置': 'vacant', '出租中': 'rented' };F
   var TYPE_CN = { rent: '房租', deposit: '押金', other: '其他' };
   var TYPE_EN = { '房租': 'rent', '押金': 'deposit', '其他': 'other' };
   var METHOD_CN = { wechat: '微信', alipay: '支付宝', cash: '现金', bank: '银行转账' };
@@ -84,6 +84,47 @@
     return Math.min(31, Math.max(1, n));
   }
 
+  /* ---- 付款周期 ---- */
+  function periodText(m) {
+    if (m === 3) return '每3个月';
+    if (m === 6) return '每6个月';
+    if (m === 12) return '每12个月';
+    return '每月';
+  }
+  function periodFromText(t) {
+    var s = str(t);
+    if (s === '每3个月') return 3;
+    if (s === '每6个月') return 6;
+    if (s === '每12个月') return 12;
+    return 1;
+  }
+  function isDateLike(v) { return /^\d{4}/.test(str(v)); }
+
+  /* ---- 日期字符串推算（提醒用） ---- */
+  function addMonthsStr(dateStr, nMonths) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr || '');
+    if (!m) return '';
+    var y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+    var total = y * 12 + (mo - 1) + nMonths;
+    var ny = Math.floor(total / 12), nm = (total % 12) + 1;
+    var nd = Math.min(d, utils.lastDayOfMonth(ny, nm));
+    return ny + '-' + utils.pad2(nm) + '-' + utils.pad2(nd);
+  }
+  function firstDueStr(startStr, payDay) {
+    var s = utils.parseDate(startStr);
+    if (!s) return '';
+    var y = s.getFullYear(), m = s.getMonth() + 1, d = s.getDate();
+    var eff = Math.min(payDay, utils.lastDayOfMonth(y, m));
+    if (d <= eff) return y + '-' + utils.pad2(m) + '-' + utils.pad2(eff);
+    var ny = (m === 12) ? y + 1 : y, nm = (m === 12) ? 1 : m + 1;
+    return ny + '-' + utils.pad2(nm) + '-' + utils.pad2(Math.min(payDay, utils.lastDayOfMonth(ny, nm)));
+  }
+  function diffDaysStr(aStr, bStr) {
+    var a = utils.parseDate(aStr), b = utils.parseDate(bStr);
+    if (!a || !b) return 0;
+    return Math.round((b.getTime() - a.getTime()) / 86400000);
+  }
+
   function parseXlsx(file) {
     return new Promise(function (resolve, reject) {
       var reader = new FileReader();
@@ -112,12 +153,16 @@
       var st = STATUS_EN[str(row[2])] || 'vacant';
       var contract = null;
       if (st === 'rented') {
+        // 新模板：第9列=付款周期；旧模板：第9列=合同开始（自动识别兼容）
+        var oldLayout = isDateLike(row[8]);
         contract = {
           tenantName: str(row[3]), tenantPhone: str(row[4]),
           monthlyRent: num(row[5]), deposit: num(row[6]),
           payDay: clampPayDay(row[7]),
-          startDate: fmtDate(row[8]), endDate: fmtDate(row[9]),
-          remark: str(row[10])
+          payPeriod: oldLayout ? 1 : periodFromText(row[8]),
+          startDate: fmtDate(oldLayout ? row[8] : row[9]),
+          endDate: fmtDate(oldLayout ? row[9] : row[10]),
+          remark: str(oldLayout ? row[10] : row[11])
         };
       }
       houses.push({ id: uid('h'), name: name, address: str(row[1]), status: st, contract: contract });
@@ -149,14 +194,15 @@
   function buildXlsx(data) {
     var wb = XLSX.utils.book_new();
     var hr = [['房源名称', '地址', '状态', '租客姓名', '联系电话', '月租金(元)', '押金(元)',
-      '每月几号收租', '合同开始', '合同结束', '备注']];
+      '每月几号收租', '付款周期', '合同开始', '合同结束', '备注']];
     data.houses.forEach(function (h) {
       var c = h.contract;
       hr.push([
         h.name, h.address, STATUS_CN[h.status] || h.status,
         c ? c.tenantName : '', c ? c.tenantPhone : '',
         c ? c.monthlyRent : '', c ? c.deposit : '',
-        c ? c.payDay : '', c ? c.startDate : '', c ? c.endDate : '',
+        c ? c.payDay : '', c ? periodText(c.payPeriod) : '',
+        c ? c.startDate : '', c ? c.endDate : '',
         c ? c.remark : ''
       ]);
     });
@@ -182,8 +228,6 @@
       var c = h.contract;
       var start = utils.parseDate(c.startDate);
       var end = utils.parseDate(c.endDate);
-      var y = now.getFullYear(), m = now.getMonth() + 1;
-      var mk = utils.monthKeyOf(now);
 
       if (end) {
         if (utils.dayKey(now) > utils.dayKey(end)) {
@@ -193,18 +237,19 @@
         }
       }
 
-      var paid = (data.payments || []).some(function (p) {
-        return p.houseId === h.id && p.type === 'rent' && p.payDate && p.payDate.indexOf(mk) === 0;
+      // 房租：按「上次房租收款日 + 付款周期」推下次应缴日；没收到过按合同首期应缴日
+      var period = c.payPeriod || 1;
+      var lastPay = '';
+      (data.payments || []).forEach(function (p) {
+        if (p.houseId === h.id && p.type === 'rent' && p.payDate && p.payDate > lastPay) lastPay = p.payDate;
       });
-      if (!paid && start) {
-        var pde = Math.min(c.payDay, utils.lastDayOfMonth(y, m));
-        var due = new Date(y, m - 1, pde, 12);
-        if (utils.dayKey(now) >= utils.dayKey(start)) {
-          if (utils.dayKey(due) < utils.dayKey(now)) {
-            items.push({ house: h, type: 'rent_overdue', days: utils.diffDays(due, now), label: '房租已逾期 ' + utils.diffDays(due, now) + ' 天' });
-          } else if (utils.diffDays(now, due) <= 7) {
-            items.push({ house: h, type: 'rent_due_soon', days: utils.diffDays(now, due), label: utils.diffDays(now, due) === 0 ? '今天应收租' : utils.diffDays(now, due) + ' 天后收租' });
-          }
+      var nextDue = lastPay ? addMonthsStr(lastPay, period) : firstDueStr(c.startDate, c.payDay);
+      if (nextDue && start) {
+        var dToDue = diffDaysStr(utils.fmtDate(now), nextDue);
+        if (dToDue < 0) {
+          items.push({ house: h, type: 'rent_overdue', days: -dToDue, label: '房租已逾期 ' + (-dToDue) + ' 天' });
+        } else if (dToDue <= 7) {
+          items.push({ house: h, type: 'rent_due_soon', days: dToDue, label: dToDue === 0 ? '今天应收租' : dToDue + ' 天后收租' });
         }
       }
     });
@@ -274,7 +319,7 @@
           '<div class="todo-body">' +
             '<div class="todo-title">' + esc(r.house.name) + '</div>' +
             '<div class="todo-text">' + esc(r.label) + '</div>' +
-            (r.house.contract ? '<div class="todo-sub">每月 ' + r.house.contract.payDay + ' 号收租 · 月租 ¥' + utils.fmtMoney(r.house.contract.monthlyRent) + '</div>' : '') +
+            (r.house.contract ? '<div class="todo-sub">' + esc(periodText(r.house.contract.payPeriod)) + '收租 · 月租 ¥' + utils.fmtMoney(r.house.contract.monthlyRent) + '</div>' : '') +
           '</div>' +
         '</div>';
       });
@@ -300,7 +345,7 @@
   function renderHouses() {
     var html = '<div class="section-label">房源（' + state.houses.length + '）</div>';
     html += '<div class="table-wrap"><table class="table">' +
-      '<thead><tr><th>房源</th><th>状态</th><th>租客</th><th>月租</th><th>收租日</th><th>合同至</th></tr></thead><tbody>';
+      '<thead><tr><th>房源</th><th>状态</th><th>租客</th><th>月租</th><th>收租日</th><th>周期</th><th>合同至</th></tr></thead><tbody>';
     state.houses.forEach(function (h) {
       var c = h.contract;
       html += '<tr>' +
@@ -309,6 +354,7 @@
         '<td>' + esc(c ? c.tenantName : '—') + '</td>' +
         '<td>' + (c ? '¥' + utils.fmtMoney(c.monthlyRent) : '—') + '</td>' +
         '<td>' + (c ? c.payDay + '号' : '—') + '</td>' +
+        '<td>' + (c ? esc(periodText(c.payPeriod)) : '—') + '</td>' +
         '<td>' + (c ? esc(c.endDate || '') : '—') + '</td>' +
         '</tr>';
     });
