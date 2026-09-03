@@ -6,7 +6,7 @@
   var BIN_ID = cfg.BIN_ID || '';
 
   var STATUS_CN = { rented: '已出租', vacant: '空置' };
-  var STATUS_EN = { '已出租': 'rented', '空置': 'vacant', '出租中': 'rented' };F
+  var STATUS_EN = { '已出租': 'rented', '空置': 'vacant', '出租中': 'rented' };
   var TYPE_CN = { rent: '房租', deposit: '押金', other: '其他' };
   var TYPE_EN = { '房租': 'rent', '押金': 'deposit', '其他': 'other' };
   var METHOD_CN = { wechat: '微信', alipay: '支付宝', cash: '现金', bank: '银行转账' };
